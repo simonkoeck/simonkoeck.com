@@ -1,0 +1,72 @@
+---
+title: "ELRS Security: What's Actually Possible Over the Air"
+date: 2026-05-11
+tags: [elrs, expresslrs, wireless, radio, drones, fhss, research]
+summary: "I bought a Radiomaster running ExpressLRS and wanted to understand what an attacker could realistically do to a drone in flight. The answer is more interesting than the 2022 headlines suggested, and also more boring."
+published: true
+---
+
+I picked up a Radiomaster transmitter recently, the kind that runs an internal ExpressLRS module at up to 1 W. Before sticking it in a quad and pointing it at the sky, I wanted to know one thing: if someone with a similar transmitter is sitting in the same field as me, what can they actually do to my link?
+
+This post is the notes I took while answering that question. It is not original vulnerability research. It is a walk through what is publicly known about ELRS security, what holds up in 2026, and what is mostly marketing noise from the 2022 news cycle.
+
+## What ELRS Is, In One Paragraph
+
+ExpressLRS is an open-source long-range radio control protocol used in FPV and fixed-wing RC. It runs on Semtech LoRa transceivers (SX1280 on 2.4 GHz, SX127x on 900 MHz) paired with an ESP32 or ESP8285. The transmitter and receiver hop across a fixed sequence of frequencies many times per second, anywhere from 50 Hz up to 1000 Hz packet rate. The hop pattern, called FHSS (frequency hopping spread spectrum), is generated deterministically from a shared seed. That seed is where this entire story starts.
+
+## The Binding Phrase Is Not a Password
+
+When you flash an ELRS receiver you type in a "binding phrase". Most users assume this is a password. It is not.
+
+ELRS takes the phrase, runs it through MD5, and keeps the first 6 bytes of the digest. That 6-byte value is the UID. The last 4 bytes of the UID are used as the seed for the FHSS sequence generator and the CRC initializer for over-the-air packets. The project documents this explicitly: the binding phrase is for collision avoidance between pilots flying at the same field, not for security.
+
+In other words, two pilots with the same phrase will collide. Two pilots with different phrases will not. That is the entire intent.
+
+## The NCC Group Finding From 2022
+
+In June 2022, NCC Group published a [technical advisory](https://www.nccgroup.com/research-blog/technical-advisory-expresslrs-vulnerabilities-allow-for-hijack-of-control-link/) describing how the binding phrase model breaks down once you accept that the UID itself shows up in the air.
+
+The short version:
+
+1. ELRS sends sync packets at a fixed cadence. Those sync packets contain 3 of the 4 UID bytes used to seed the FHSS sequence. That is 75% of the seed, leaked plaintext, on a frequency anyone with a $20 Semtech radio can listen to.
+2. Only 1 byte of seed is missing. 256 possibilities. But the RNG used by ELRS happens to produce identical hop sequences for the upper and lower halves of that byte's value range, so you only need to test 128 candidates.
+3. For each candidate, you generate the FHSS sequence and check whether real packets keep showing up on the predicted frequency at the predicted time. The right candidate matches. The other 127 do not.
+4. Once you have the seed, your own transmitter can speak on the correct frequencies at the correct times with the correct CRC. You can drown out the legitimate transmitter and the receiver will lock onto your signal.
+
+The headline at the time was "drone hijack". The honest version is "given line of sight, a moderately motivated attacker with the right transmitter can hijack the link of any ELRS aircraft running 1.x or 2.x firmware."
+
+## What Actually Got Fixed
+
+This is the part the original news coverage mostly missed. The ELRS maintainers pushed back on the advisory, and not all of the pushback was fair, but some of it was. The interesting move came in the 3.x release series.
+
+ELRS 3.0 changed the over-the-air sync packet to send a hash of the UID rather than the UID itself. The receiver, which already knows its own UID, can compare hashes without ever putting the seed on air. The CRC initializer was also reworked. This is the closest thing ELRS has shipped to a real security improvement, and it directly addresses the disclosure path that NCC Group described.
+
+Note what this does and does not do:
+
+- It does close the "passively observe sync packets, recover the UID, hijack the link" path on receivers and transmitters running 3.x firmware with each other.
+- It does not encrypt or authenticate the payload. Channel data, telemetry, GPS coordinates, all of it is still plaintext on a known frequency hop pattern. If someone recovers the UID through any other path, say someone shares their model file on Discord, the link is still trivially impersonatable.
+- It does not protect against jamming. Nothing in the protocol can.
+
+A separately submitted PR ([#1411](https://github.com/ExpressLRS/ExpressLRS/pull/1411)) tried to push further, including a better RNG and a smaller UID, and was closed without merging. The maintainers' position there is defensible if you take the project at its word: ELRS is a low-latency control link, not a secure one. The official [encryption discussion](https://github.com/ExpressLRS/ExpressLRS/discussions/1609) was closed with the label "not going to happen".
+
+## What An Attacker Can Realistically Do In 2026
+
+Let me try to be honest about each scenario.
+
+**Hijack a 1.x or 2.x link by sitting at the same field.** Yes. Old firmware is still out there. There are still receivers that have not been re-flashed since 2021. The 2022 attack works against them today.
+
+**Hijack a 3.x link by sitting at the same field.** No, not through the sync-packet path. The UID does not go on air anymore. You would need to recover the binding phrase through some other route, like the user pasting it into a forum or the build artifact leaking from a CI pipeline.
+
+**Recover GPS or telemetry from someone else's aircraft.** Yes if you know their UID (you can recover it on 1.x/2.x, or they leak it). The protocol does not encrypt payloads. There is a third-party fork called [PrivacyLRS](https://github.com/sensei-hacker/PrivacyLRS) that wraps the same physical layer with ChaCha20 and addresses this. It is not the upstream project.
+
+**Jam the link.** Yes, always, and there is no protocol-level defense against this. The 2.4 GHz ISM band is shared with WiFi and Bluetooth and microwave ovens. A focused jammer at 1 W within line of sight can deny a 100 mW link without any cryptography being involved. ELRS has a configurable failsafe behavior in the receiver (cut throttle, hold last, return-to-home) and that is the only mitigation. It lives in the flight controller, not the radio link.
+
+**Replay a captured control packet.** In principle yes, in practice not useful on its own. Packets are sequenced and time-aligned to the hop schedule. A replayed packet from earlier in the sequence will not match the receiver's current expected frequency or sequence window. To get a useful replay you basically need to have already done the takeover work, at which point you do not need replay, you have the link.
+
+## The Boring Conclusion
+
+ELRS in 2026 is, for practical hobby use, a reasonable system. The class of attack that made headlines in 2022 was patched at the protocol level in 3.x, and the protocol's authors are upfront that they do not claim cryptographic guarantees. If you actually need authenticated, confidential RC for a use case beyond hobby flying (search and rescue, commercial inspection, anything operating near people or infrastructure), you should be looking at a different stack, or running PrivacyLRS, or accepting that the radio link is the wrong place to enforce that property and pushing the trust boundary up into the flight controller and GCS.
+
+The thing I wanted to know before buying the radio was: if I bring this to a field in Vienna, can someone with their own ELRS module flip my quad out of the sky on a lark? Realistically, on 3.x firmware, no. They can jam me and force a failsafe, but they can do that to almost anything that broadcasts in the 2.4 GHz ISM band, and the failsafe handling is well-trodden.
+
+That is not the same as saying ELRS is secure. It is saying ELRS is a control link with the threat model of a control link, and it tells you that on the box.
