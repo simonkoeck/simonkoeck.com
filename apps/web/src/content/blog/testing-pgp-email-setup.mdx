@@ -1,0 +1,57 @@
+---
+title: "I Set Up PGP Email For The First Time And Wanted To Actually Test It"
+date: 2026-05-15
+tags: [pgp, openpgp, gpg, email, wkd, autocrypt, encryption]
+summary: "I finally enabled PGP on my email this week. I had no good way to convince myself the setup was correct end to end, so I built one."
+published: true
+---
+
+I had been meaning to set up PGP email for a while, and this week I finally did it. Key generated, client configured, public key uploaded. The kind of project that takes one focused evening and then leaves you in this weirdly uncertain place: technically everything is wired up, but there is no obvious way to confirm it actually works.
+
+The classic test is to send yourself an encrypted email from another machine, or talk a friend into trying. Both feel circular. You are the recipient too, so any decrypt-side mistakes get masked by your own setup. And a friend with PGP is hard to find in 2026.
+
+What I actually wanted was a robot on the other end. Someone who would read my message, check that the encryption was real, look up my public key the way a stranger would, and write back an encrypted reply. If the reply landed and decrypted cleanly, I would know the whole chain worked.
+
+So I built one. [mailenc.org](https://mailenc.org). You open the site, copy the one-shot address it shows you, and send a PGP-encrypted email to it. The page streams the verification live, and a few seconds later you get an encrypted echo report in your inbox.
+
+## What "Working" Actually Means For PGP Email
+
+The reason a simple yes/no test does not exist is that "PGP email works" is really four separate questions stacked on top of each other.
+
+The first is the envelope. Is the message wrapped as PGP/MIME (a `multipart/encrypted` container with `protocol="application/pgp-encrypted"`) or inlined into a `text/plain` body with `-----BEGIN PGP MESSAGE-----` markers? Different clients prefer different formats. Some only handle one of the two cleanly.
+
+The second is the encryption itself. Did the recipient's private key actually decrypt the message, with a modern cipher and a working integrity check (MDC or AEAD)?
+
+The third is whether your public key is discoverable. This is the silent failure mode. You can send perfect encrypted email all day, but if a stranger has no way to find your key, nobody can encrypt anything back to you.
+
+The fourth is signatures. Even if everything decrypted, can the receiver verify your embedded signature against the key they discovered for you? Different rock, same chain.
+
+A round-trip test answers all four at once. The bot has to actually try each step. Either the reply lands and decrypts and validates, or it does not.
+
+## Three Ways To Publish A PGP Key, And Why The Bot Tries All Of Them
+
+Modern OpenPGP defines three independent ways to make your public key findable by your email address. They have wildly different trust properties, and most people set up exactly one of them without realising the others exist.
+
+**WKD (Web Key Directory)** is the strongest. Your domain serves the key file directly at a deterministic HTTPS URL: `https://openpgpkey.<your-domain>/.well-known/openpgpkey/<your-domain>/hu/<z-base-32 hash of your localpart>?l=<localpart>`. The hash is SHA-1 of the lowercased localpart, encoded in z-base-32 (a slightly different alphabet to standard base32, which is its own little trap). If the URL returns key bytes, whoever runs DNS for your domain published it. That is about as close to authoritative as PGP gets without a CA.
+
+**Autocrypt** is the easiest. Your client attaches a header like `Autocrypt: addr=you@example.com; keydata=<base64>` to every outbound message. Anyone who has ever received an email from you already has your key sitting in their MUA cache. The downside is that anyone can inject any Autocrypt header into any message, so the trust level is opportunistic, not authoritative.
+
+**HKPS keyservers** are the universal fallback. You upload to keys.openpgp.org and anyone can query `https://keys.openpgp.org/vks/v1/by-email/<address>` to fetch it. Modern keyservers verify the email address before publishing, which is better than nothing, but the binding is weaker than WKD because the keyserver, not your domain, is the one asserting it.
+
+The bot fires all three lookups in parallel and prefers them in that order: WKD, then Autocrypt, then HKPS. The report shows you which sources had a key, which one was picked for the reply, and the exact URL or header it used. If something is broken, you can see which leg.
+
+## The Chicken And Egg Of Signature Verification
+
+There is a subtle ordering problem in the pipeline. To verify a signature, you need the signer's public key. To discover the signer's key, you need to know who they are. PGP encryption hides the sender's identity (sort of, the signature subkey ID leaks but the user ID does not).
+
+The bot resolves this by reading the From header to identify the sender, doing discovery first, then verifying any signatures inside the decrypted message against the discovered key. This is mostly fine, but it is worth noting that the From header is not authenticated. An attacker could spoof From and force the bot to verify a signature against the wrong key, which would fail. The signature check is then a check on the integrity of (claimed sender, claimed key, actual message), not on the sender's identity in any cryptographic sense.
+
+For a self-test that is exactly the right behaviour. You sent the email, you know who you are, and the bot is confirming that your client signed correctly against the key you publish. For a production threat model it would matter more.
+
+## Should You Trust It
+
+Mostly. The bot's private key is stored as an encrypted secret. The site never persists the body of your message, only the metadata of the checks (booleans, fingerprints, URLs). The codebase is open source at [github.com/simonkoeck/mailenc](https://github.com/simonkoeck/mailenc), so you can read what it actually does with your message.
+
+Still, treat it like any free internet tool. Do not send anything you would not want a polite-but-fallible service to briefly handle.
+
+If you have just set up PGP, or have been using it for years and never really verified it, go to [mailenc.org](https://mailenc.org). It takes about thirty seconds and tells you what is actually working.
