@@ -1,18 +1,18 @@
 ---
-title: "I Set Up PGP Email For The First Time And Wanted To Actually Test It"
+title: "How to Test Your PGP Email Setup End to End"
 date: 2026-05-15
-tags: [pgp, openpgp, gpg, email, wkd, autocrypt, encryption]
-summary: "Setting up PGP email is easy now. Confirming that it actually works end to end, less so. I built a small tool to do that, and found out along the way how much of modern PGP email is held together with rubber bands."
+tags: [pgp, openpgp, gpg, email, wkd, autocrypt, hkps, encryption, thunderbird]
+summary: "Setting up PGP email is easy now. Confirming that the encryption, key discovery, and signing actually work end to end, less so. Here is how to test your PGP email setup, what can go wrong, and a free tool that does the round trip for you."
 published: true
 ---
 
-I set up PGP email this week. The setup itself was painless. Thunderbird generated a keypair for me from its built-in OpenPGP settings, attached an Autocrypt header to my outgoing mail, and my WKD endpoint resolved when I queried it from a fresh shell. Every box I could check, checked. What I had no way to know was whether any of it actually composed into something a stranger could use to encrypt to me.
+I set up PGP email this week. The setup itself was painless. Thunderbird generated a keypair for me from its built-in OpenPGP settings, attached an Autocrypt header to my outgoing mail, and my WKD endpoint resolved when I queried it from a fresh shell. Every box I could check, checked. What I had no way to know was whether any of it actually composed into something a stranger could use to encrypt email back to me.
 
-The standard way to test this is to send yourself a message from another machine. It does not really work. You are also the recipient, so any decrypt-side mistake gets masked by your own setup. You need a real stranger with PGP to try, and that population is small in 2026.
+The standard way to test PGP email is to send yourself a message from another machine. It does not really work. You are also the recipient, so any decrypt-side mistake gets masked by your own setup. You need a real stranger with PGP to try, and that population is small in 2026.
 
-So I wrote a small tool that plays the stranger. You can find it at [mailenc.org](https://mailenc.org). You open the site, copy the address it shows you, and send it a PGP-encrypted email from your normal client. The site reads what you sent, looks for your public key the way a real correspondent would, encrypts a reply, and writes back. If the encrypted reply lands and decrypts cleanly, you know the chain worked. If it does not, the report tells you which piece is broken.
+So I wrote a small tool that plays the stranger. You can find it at [mailenc.org](https://mailenc.org). You open the site, copy the address it shows you, and send it a PGP-encrypted email from your normal client. The site reads what you sent, looks for your public key the way a real correspondent would, encrypts a reply, and writes back. If the encrypted reply lands and decrypts cleanly, you know the whole PGP email chain worked. If it does not, the report tells you which piece is broken.
 
-## Why this is harder than it sounds
+## Why testing PGP email is harder than it sounds
 
 A working PGP email setup is at least four separate things stacked on top of each other.
 
@@ -20,24 +20,34 @@ The envelope has to be right. PGP/MIME wraps the message in a `multipart/encrypt
 
 The encryption has to actually decrypt. The right cipher, a key with the right capabilities, an intact integrity check. Modern OpenPGP has several ways to get this wrong, most of which produce no error on the sender side.
 
-Your public key has to be findable. This is the silent failure mode. You can send perfectly encrypted email forever, but if a stranger has no way to find your key, nobody can encrypt anything back to you.
+Your public key has to be findable. This is the silent failure mode. You can send perfectly encrypted email forever, but if a stranger has no way to look up your key, nobody can encrypt anything back to you.
 
 And if you signed your message, the signature has to verify against whatever key they did find. Which may or may not be the key your client used to sign with.
 
-A round-trip test answers all four at once. There is nothing to fake. The reply either lands and decrypts and validates, or it does not.
+A round-trip test answers all four questions at once. There is nothing to fake. The reply either lands and decrypts and validates, or it does not.
 
-## How to publish a PGP key
+## How to publish a PGP public key so people can encrypt to you
 
-There are three real options.
+There are three real options for making your OpenPGP public key discoverable.
 
-WKD (Web Key Directory) is the strongest. The URL is deterministic from your address, the key sits on your own domain under `/.well-known/openpgpkey/`, and the only person who can publish anything there is whoever runs your DNS. That last property is what makes WKD different from everything else. No third parties involved.
+**WKD (Web Key Directory)** is the strongest. The lookup URL is deterministic from your email address, the key sits on your own domain under `/.well-known/openpgpkey/`, and the only person who can publish anything there is whoever runs your DNS. That last property is what makes WKD different from every other PGP key distribution method. No third parties involved, no trust-on-first-use, no keyserver outage to worry about.
 
-Autocrypt is the most pragmatic. Your client attaches your public key as a header on every outbound message. Recipients cache the header, and after a few weeks of mail you correspond with, everyone has your key without doing anything. The downside is that anyone who has ever emailed you could in principle have planted any Autocrypt header. It is useful as "the key I have been seeing for this person", not as a real binding.
+**Autocrypt** is the most pragmatic option for casual use. Your mail client attaches your public key as an `Autocrypt:` header on every outbound message. Recipients cache the header, and after a few weeks of mail back and forth, everyone you correspond with can encrypt back to you without doing anything. The downside is that anyone who has ever emailed you could in principle have planted any Autocrypt header. Useful as "the key I have been seeing for this person", not as a real binding.
 
-HKPS keyservers like keys.openpgp.org are the fallback. Anyone can upload. The modern ones verify the email address before publishing, which is better than nothing, but the assertion is "someone with access to this mailbox uploaded this key", not "this is the canonical key for this address". For a fresh setup it is often the only thing available, so the bot does check it.
+**HKPS keyservers** like `keys.openpgp.org` are the universal fallback. Anyone can upload a key. Modern keyservers do verify the email address before publishing, which is better than the old reckless HKP era, but the assertion is "someone with access to this mailbox uploaded this key", not "this is the canonical key for this address". For a freshly-set-up address it is often the only thing available.
 
-The bot tries all three in parallel and prefers them in that order: WKD, then Autocrypt, then HKPS. The report tells you which one it actually used, so if your supposedly correct WKD setup is broken, you can see Autocrypt picked instead and know where to look.
+A good PGP email test checks all three. The bot at mailenc.org runs the three lookups in parallel and prefers them in that order: WKD, then Autocrypt, then HKPS. The report tells you which one it actually used, so if your supposedly-correct WKD setup is silently broken, you will see Autocrypt picked instead and know where to look.
+
+## How to read the test report
+
+When you send an email to the test address, the report comes back with one line per check. The interesting ones are usually:
+
+- **WKD lookup failed**. Either your domain does not publish a key at the WKD path, or it returns something that is not an OpenPGP key (a common one: a generic 200-OK page from a wildcard catch-all worker). Fix by publishing the key at `https://yourdomain/.well-known/openpgpkey/hu/<hash>?l=<localpart>` and making sure the response body is the binary key.
+- **Autocrypt header missing**. Your mail client is not attaching the `Autocrypt:` header. Thunderbird and K-9 do this by default. In some configurations (third-party MUAs, mailing list rewriters) it gets stripped.
+- **HKPS lookup failed**. You have never uploaded your key to keys.openpgp.org, or you uploaded it but did not confirm the verification email. Confirm and try again.
+- **Signature does not verify**. Your client signed with a subkey that is not on the public key the bot discovered. This usually means your published key is out of date relative to what your client is using.
+- **Encrypted reply does not arrive**. Almost always a DKIM/SPF/DMARC alignment issue on your inbound side, or a strict spam filter rejecting freshly-set-up sender domains. Check the receiving mail server logs.
 
 ## Try it
 
-If you have just set up PGP, or you have been using it for years and never really stress-tested it, [mailenc.org](https://mailenc.org) takes about thirty seconds. No signup. Encrypted reply lands in your inbox with a list of every check that passed and every one that did not.
+If you have just set up PGP, or you have been using it for years and never really stress-tested the round trip, [mailenc.org](https://mailenc.org) takes about thirty seconds. No signup. Send a PGP-encrypted email from your client, get an encrypted reply back, and read the list of every check that passed and every one that did not.
