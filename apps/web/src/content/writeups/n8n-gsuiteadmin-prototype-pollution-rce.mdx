@@ -1,0 +1,116 @@
+---
+title: "From a Schema Name to RCE in n8n"
+date: 2026-04-28
+severity: critical
+cvss: 9.4
+platform: n8n
+tags: [prototype-pollution, rce, n8n, javascript, supply-chain, git, workflow-automation]
+summary: "n8n uses a user-supplied schema name as a bare object key. Set it to __proto__, pollute the prototype, chain into RCE via the Git node. One request, full shell."
+published: true
+cve: CVE-2026-33696
+ghsa: GHSA-mxrg-77hm-89hv
+---
+
+import Callout from "../../components/Callout.astro";
+import Timeline from "../../components/Timeline.astro";
+
+## How I Found It
+
+While auditing n8n's node implementations, I started looking for places where user-supplied strings end up as property keys on plain objects.
+
+The pattern I was looking for was simple. anywhere a user-supplied string ends up as a property key on a plain object without first checking for `__proto__`, `constructor`, or `prototype`. I grepped through the nodes-base package and the GSuiteAdmin node stood out immediately.
+
+The node has a "Custom Fields" section for user create and update operations. It lets you specify a schema name, field name, and value. all three come from the workflow configuration, which means an attacker with editor access controls them entirely. The schema name is used directly as a dynamic key to group fields:
+
+```typescript
+customSchemas[schemaName] ??= {};
+(customSchemas[schemaName] as IDataObject)[fieldName] = value;
+```
+
+That's the whole bug. If `schemaName` is `"__proto__"`, you're writing to `Object.prototype`.
+
+## Technical Details
+
+### The Vulnerable Code
+
+The GSuiteAdmin node handles custom schema fields in both the user **create** (line 520-521) and **update** (line 802-803) operations with identical code:
+
+```typescript
+const customSchemas: IDataObject = {};
+customFields.forEach((field) => {
+    const { schemaName, fieldName, value } = field as {
+        schemaName: string;
+        fieldName: string;
+        value: string;
+    };
+
+    customSchemas[schemaName] ??= {};                              // (1)
+    (customSchemas[schemaName] as IDataObject)[fieldName] = value; // (2)
+});
+```
+
+When `schemaName` is `"__proto__"`:
+
+1. `customSchemas["__proto__"]` triggers the `__proto__` getter, which returns `Object.prototype`. it's not nullish, so the `??=` assignment is a no-op
+2. `(Object.prototype)[fieldName] = value` writes an attacker-controlled string directly onto the global object prototype
+
+Every plain object created after this point inherits the polluted property.
+
+### From Pollution to Code Execution
+
+The pollution alone is already dangerous (it crashes the entire n8n instance via TypeORM. more on that below), but it also chains into full RCE through the exact same gadget I found in the XML node report.
+
+The chain works like this:
+
+1. **simple-git creates a plain env object.** When the Git node calls `.env()`, simple-git allocates `{}` to hold environment variables. This object inherits from `Object.prototype`.
+
+2. **Node.js `spawn()` inherits polluted properties.** When building the child process environment, Node.js iterates the env object's properties. including inherited ones from the polluted prototype.
+
+3. **Git respects `GIT_SSH_COMMAND`.** When git encounters an SSH-style URL, it spawns `GIT_SSH_COMMAND` as a shell command. If we pollute `Object.prototype.GIT_SSH_COMMAND`, it propagates into the git child process and gets executed.
+
+So the full attack is: **Webhook → GSuiteAdmin (pollution) → Git (RCE)**.
+
+### Proof of Concept
+
+The workflow setup:
+
+1. **Webhook node**. `POST /rce`
+2. **GSuiteAdmin node**. Resource: User, Operation: Create. Set the Custom Fields schema name, field name, and value to expressions reading from the webhook body
+3. **Git node**. Operation: Clone, pointed at an SSH URL
+
+A single HTTP request fires the entire chain:
+
+```bash
+curl -X POST "https://TARGET/webhook/rce" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "schemaName": "__proto__",
+    "fieldName": "GIT_SSH_COMMAND",
+    "value": "sh -c '\''id; cat /etc/passwd'\'' --"
+  }'
+```
+
+The GSuiteAdmin node fails at the Google API call (it doesn't matter. the pollution already happened before the request was sent), and then the Git node spawns `git clone` with the polluted `GIT_SSH_COMMAND`, executing the attacker's command as the n8n process user.
+
+### The DoS Side Effect
+
+Even without the RCE chain, the pollution is destructive on its own. After `Object.prototype` is polluted, TypeORM's `buildWhere` function picks up the extra properties via `for...in` iteration and throws `EntityPropertyNotFoundError` on every database query. The n8n UI goes unresponsive, all workflow executions fail, and the instance requires a full restart to recover.
+
+## Impact
+
+- **Remote code execution** as the n8n process user on all deployment types. self-hosted, worker mode, and Cloud
+- **Full credential theft**. the n8n process holds the encryption key for all stored credentials
+- **Complete denial of service**. the TypeORM crash loop makes the instance non-functional until restart
+
+## Remediation
+
+The fix is straightforward: reject dangerous property names before using them as object keys. A blocklist check for `__proto__`, `constructor`, and `prototype` on the `schemaName` value (or using `Object.create(null)` for `customSchemas`) would prevent the pollution entirely.
+
+n8n's codebase already has a `deepMerge` utility with prototype pollution guards. the GSuiteAdmin node just wasn't using it.
+
+## Timeline
+
+<Timeline events={[
+  { date: "2025-02-26", title: "Report submitted to n8n security team" },
+  { date: "2025-03-25", title: "Advisory and CVE published" },
+]} />
