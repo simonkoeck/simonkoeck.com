@@ -18,7 +18,7 @@ This website does not use cookies or tracking scripts. Cloudflare Web Analytics 
 
 ## Engagement Features
 
-Writeup pages include a view counter and emoji reactions. When you visit a writeup, a cryptographic hash (SHA-256) of your IP address is temporarily stored in Cloudflare KV to deduplicate view counts. This hash expires after 24 hours and cannot be used to recover your IP address. Reaction preferences are stored locally in your browser via localStorage and are never sent to any server. No personal data is collected or retained through these features.
+Writeup pages include a view counter and emoji reactions. Your IP address is used for rate limiting. To avoid counting repeat views, a shortened SHA-256 hash of your IP address is stored in Cloudflare KV for 24 hours. Aggregate view and reaction counts remain. Reaction preferences are stored locally in your browser via localStorage and are never sent to the server.
 
 ## Fonts
 
@@ -34,11 +34,10 @@ This site contains links to external websites (e.g., GitHub, NVD). These sites h
 
 ## Your Rights
 
-Under the GDPR, you have the right to access, rectify, or delete any personal data. Since this website does not collect personal data, there is typically nothing to request. If you have questions, contact me at [simon@koeck.dev](mailto:simon@koeck.dev).
+Under the GDPR, you may have the right to access, rectify, or delete personal data processed through this site. If you have questions or want to exercise your rights, contact me at [simon@koeck.dev](mailto:simon@koeck.dev).
 
 ## Contact
 
-Simon Koeck
-Wolf-Huber-Straße 31
-6800 Feldkirch, Austria
+Simon Koeck\
+Feldkirch, Austria\
 Email: [simon@koeck.dev](mailto:simon@koeck.dev)

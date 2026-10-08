@@ -8,7 +8,6 @@ const writeups = (await getCollection("writeups"))
 const items = [
   { title: "Home", href: "/", section: "Pages" },
   { title: "Writeups", href: "/writeups", section: "Pages" },
-  { title: "Projects", href: "/projects", section: "Pages" },
   { title: "About", href: "/about", section: "Pages" },
   ...writeups.map((w) => ({
     title: w.data.title,

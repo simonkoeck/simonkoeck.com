@@ -66,7 +66,6 @@ prefetch: {
           const href = element.properties?.href;
           if (typeof href === "string" && (
             href.includes("simonkoeck.com") ||
-            href.includes("shipsecu.re") ||
             href.includes("looksphishy.org") ||
             href.includes("namply.com")
           )) {
