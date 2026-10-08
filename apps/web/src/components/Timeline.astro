@@ -3,6 +3,7 @@ interface Props {
   events: Array<{
     date: string;
     title: string;
+    description?: string;
   }>;
 }
 
@@ -19,6 +20,9 @@ const { events } = Astro.props;
             {event.date}
           </time>
           <p class="text-base text-zinc-300 mt-1">{event.title}</p>
+          {event.description && (
+            <p class="text-sm text-zinc-500 mt-1">{event.description}</p>
+          )}
         </li>
       ))
     }

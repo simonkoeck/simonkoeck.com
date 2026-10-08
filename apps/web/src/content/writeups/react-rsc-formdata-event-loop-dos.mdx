@@ -1,0 +1,117 @@
+---
+title: "A Single POST Freezes Any Next.js Server"
+date: 2026-10-08
+severity: high
+cvss: 7.5
+platform: React
+tags:
+  [
+    dos,
+    denial-of-service,
+    react,
+    rsc,
+    next.js,
+    server-actions,
+    formdata,
+    event-loop,
+    nodejs,
+  ]
+summary: "To rebuild one submitted form, React scanned every field in the request once for each reference it contained. Nothing capped either number, so one 900 KB POST makes the server do 100 million checks and freeze."
+published: true
+cve: CVE-2026-23870
+ghsa: GHSA-rv78-f8rc-xrxh
+---
+
+import Timeline from "../../components/Timeline.astro";
+import HttpRequest from "../../components/HttpRequest.astro";
+
+## How I Found It
+
+Modern React lets you wire a form straight to a function that runs on your server, a "server action." The user submits the form, the function runs on the backend. Before it can run, React has to take the raw HTTP request and rebuild your form data out of it. That rebuilding code runs on every single server-action call, and it works entirely on data the sender controls. Exactly the kind of code worth reading.
+
+React's format lets one field in the form point at another. One of those pointers, which React writes as `$K`, means "there's a nested form in here." This is the code that resolves a single `$K`:
+
+```js
+case 'K': {
+  const data = new FormData();
+  const keys = Array.from(response._formData.keys()); // list every field in the request
+  for (let i = 0; i < keys.length; i++) {             // then check all of them
+    if (keys[i].startsWith(formPrefix)) { /* ... */ }
+  }
+  return data;
+}
+```
+
+In plain terms: for each `$K` pointer, React walks the entire list of fields in the request looking for matches. So one pointer costs one full pass over every field.
+
+Here's the catch. Nothing limits how many `$K` pointers a request can contain, and nothing limits how many fields it can contain. The sender picks both. Put 10,000 pointers and 10,000 fields in one request, and React makes 10,000 passes over 10,000 fields. That's 100 million string checks, and it runs them all back to back without ever pausing.
+
+The "without pausing" part is what turns it into a server killer. Node.js handles every incoming request on a single thread. While it's grinding through those 100 million checks, it can't do anything else. Every other visitor just waits for it to finish.
+
+## The Caps That Don't Help
+
+React does have two size limits right next to this code, but neither one covers it. The first only limits how deeply arrays can nest. The second limits how many arguments an action call can take, which sounds like it should stop me, except you get around it by burying the giant list of pointers one level deeper than the limit bothers to look:
+
+```text
+level 1 (counted):      ["$2"]
+level 2 (not counted):  ["$Knomatch0", … ,"$Knomatch9999"]
+```
+
+The limit sees the one item on the top level and never notices the 10,000 hiding underneath.
+
+## No Login Required
+
+The rebuilding happens before any security check runs. No login, no CSRF token, no origin check looks at the request until after the damage is done. The only thing you need is the app's "action ID," a hash that names the server function, and apps basically hand it out: it's printed in the page's HTML, and it sits in plain text inside the JavaScript files the browser downloads anyway. Grab it and send one POST. If the action is on a public page, you don't even need an account. If it's behind a login, any normal account works, because every logged-in user goes through the same path.
+
+<HttpRequest
+  method="POST"
+  url="https://target/any-page-with-a-server-action"
+  headers={{
+    "Content-Type": "multipart/form-data; boundary=B...",
+  }}
+  body={`$ACTION_0:0   =  {"id":"<action-id>", ...}    # the action to call
+$ACTION_0:2   =  ["$Knomatch0", … ,"$Knomatch9999"]  # 10,000 pointers, buried one level deep
+filler_0      =  x                                   # 10,000 filler fields
+  …                                                  #   for the pointers to scan
+filler_9999   =  x`}
+/>
+
+With 10,000 pointers and 10,000 filler fields, that request is about 900 KB.
+
+## Proof
+
+I pulled an action ID from the target, built the request above, sent it, and timed how long it took, while a second loop kept pinging another page to see if the server was still answering.
+
+On a plain production build on my laptop, one request froze the server for about 4 seconds. The action does eventually return, but only once the whole scan finishes, and anything that arrives during that window either waits in line or times out. Five requests back to back gave about 20 seconds of straight downtime.
+
+A real production-shaped setup was worse: around 10 seconds per request, and three in a row were enough for the load balancer in front to decide the server was dead, take it out of rotation, and start handing 503 errors to people who had nothing to do with me.
+
+## Who's Affected
+
+This code lives in a piece React shares across its different setups, so it isn't specific to one framework. React fixed it in `19.0.6`, `19.1.7`, and `19.2.6`. Any `19.0`, `19.1`, or `19.2` release below those is vulnerable, in all three published packages:
+
+- `react-server-dom-webpack`
+- `react-server-dom-turbopack`
+- `react-server-dom-parcel`
+
+(The `react-server-dom-esm` build runs the identical code but wasn't named in the advisory.)
+
+In practice that's basically any Next.js 14+ app, or any other React Server Components setup, on a pre-patch React 19.0 to 19.2 release with at least one server action anywhere it can be reached. A single action that just logs a form field is enough.
+
+## The Fix
+
+The whole problem was that React rescanned the full field list once for every pointer. The fix makes it scan the list once for the entire request instead.
+
+React added a small wrapper around the incoming form data that keeps a bookmark of where it left off and deletes each field as it gets used. So the pointers now share a single walk through the fields, start to finish, instead of each one restarting from the top. With that, 10,000 pointers no longer mean 10,000 scans, and my payload does nothing special anymore. It shipped in React's advisory `GHSA-rv78-f8rc-xrxh`.
+
+Meta shipped the patch upstream as **CVE-2026-23870**. I found out by watching the commit land, not from any status update. As I'm writing this, the report is still sitting on "New" on the bug bounty platform, I'm not credited anywhere in the advisory, and I've never gotten a reply beyond the automated acknowledgement. So: silently fixed, then ghosted. I checked in twice and held off publishing this the whole time. Nothing came back, so here it is.
+
+## Timeline
+
+<Timeline
+  events={[
+    { date: "Apr 21, 2026", title: "Reported to Meta" },
+    { date: "May 6, 2026", title: "Patched upstream as CVE-2026-23870" },
+    { date: "Oct 8, 2026", title: "Public writeup" },
+  ]}
+/>
