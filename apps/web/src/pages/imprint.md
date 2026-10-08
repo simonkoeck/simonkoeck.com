@@ -4,10 +4,12 @@ title: Imprint
 description: Media disclosure and contact information for simonkoeck.com.
 ---
 
-## Information pursuant to § 25 Austrian Media Act
+## Operator and media owner
 
-Simon Koeck\
+Simon Köck\
 Feldkirch, Austria
+
+This is my personal portfolio and research site. Current bug bounty payouts and commercial security engagements are handled by [Sorpus GmbH](https://sorpus.com/imprint/).
 
 ## Editorial focus
 
